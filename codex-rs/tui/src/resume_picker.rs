@@ -44,6 +44,15 @@ const UPDATED_COL_MAX_WIDTH: usize = 16;
 const CONVERSATION_COL_MAX_WIDTH: usize = 60;
 const MIN_UPDATED_WIDTH: usize = 7;
 const MIN_CONVERSATION_WIDTH: usize = 4;
+const ROW_GAP_LINES: u16 = 1;
+
+fn rows_for_height(height: usize) -> usize {
+    if height == 0 {
+        return 0;
+    }
+    let row_height = usize::from(ROW_GAP_LINES).saturating_add(1);
+    height.saturating_add(row_height - 1) / row_height
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TimeFilter {
@@ -200,8 +209,9 @@ pub async fn run_resume_picker(
                     TuiEvent::Draw => {
                         if let Ok(size) = alt.tui.terminal.size() {
                             let list_height = size.height.saturating_sub(4) as usize;
-                            state.update_view_rows(list_height);
-                            state.ensure_minimum_rows_for_view(list_height);
+                            let visible_rows = rows_for_height(list_height);
+                            state.update_view_rows(visible_rows);
+                            state.ensure_minimum_rows_for_view(visible_rows);
                         }
                         draw_picker(alt.tui, &state)?;
                     }
@@ -1001,41 +1011,74 @@ fn render_list(
         return;
     }
 
-    let capacity = area.height as usize;
+    let capacity = rows_for_height(area.height as usize);
+    if capacity == 0 {
+        return;
+    }
     let start = state.scroll_top.min(rows.len().saturating_sub(1));
     let end = rows.len().min(start + capacity);
     let labels = &metrics.labels;
     let mut y = area.y;
+    let blank_line = (area.width > 0).then(|| Line::from(" ".repeat(area.width as usize)));
+    let rows_rendered = end.saturating_sub(start);
 
     for (idx, (row, updated_label)) in rows[start..end]
         .iter()
         .zip(labels[start..end].iter())
         .enumerate()
     {
+        if y >= area.y.saturating_add(area.height) {
+            break;
+        }
+
         let is_sel = start + idx == state.selected;
-        let marker = if is_sel { "> ".bold() } else { "  ".into() };
+        let marker = if is_sel { "> ".cyan().bold() } else { "  ".into() };
         let mut spans: Vec<Span> = vec![marker];
         if widths.conversation > 0 {
-            spans.push(Span::from(pad_or_truncate(
-                &row.preview,
-                widths.conversation,
-            )));
+            let preview = pad_or_truncate(&row.preview, widths.conversation);
+            spans.push(if is_sel { preview.bold() } else { preview.into() });
         }
         if widths.updated > 0 {
             spans.push("  ".into());
-            spans.push(Span::from(pad_or_truncate(updated_label, widths.updated)).dim());
+            let updated = pad_or_truncate(updated_label, widths.updated);
+            spans.push(updated.dim());
         }
 
         let line: Line = spans.into();
         let rect = Rect::new(area.x, y, area.width, 1);
         frame.render_widget_ref(line, rect);
         y = y.saturating_add(1);
+
+        if idx + 1 < rows_rendered {
+            for _ in 0..usize::from(ROW_GAP_LINES) {
+                if y >= area.y.saturating_add(area.height) {
+                    break;
+                }
+                let spacer_rect = Rect::new(area.x, y, area.width, 1);
+                if let Some(blank) = blank_line.as_ref() {
+                    frame.render_widget_ref(blank.clone(), spacer_rect);
+                } else {
+                    frame.render_widget_ref(Line::from(""), spacer_rect);
+                }
+                y = y.saturating_add(1);
+            }
+        }
     }
 
     if state.pagination.loading.is_pending() && y < area.y.saturating_add(area.height) {
-        let loading_line: Line = vec!["  ".into(), "Loading older sessions…".italic().dim()].into();
-        let rect = Rect::new(area.x, y, area.width, 1);
-        frame.render_widget_ref(loading_line, rect);
+        if rows_rendered > 0 && y < area.y.saturating_add(area.height) {
+            if let Some(blank) = blank_line.as_ref() {
+                let rect = Rect::new(area.x, y, area.width, 1);
+                frame.render_widget_ref(blank.clone(), rect);
+            }
+            y = y.saturating_add(1);
+        }
+        if y < area.y.saturating_add(area.height) {
+            let loading_line: Line =
+                vec!["  ".into(), "Loading older sessions…".italic().dim()].into();
+            let rect = Rect::new(area.x, y, area.width, 1);
+            frame.render_widget_ref(loading_line, rect);
+        }
     }
 }
 
